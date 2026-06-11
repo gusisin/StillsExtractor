@@ -1,0 +1,2 @@
+# 360 Cubemap Stills Extractor
+Pillow>=10.0.0
