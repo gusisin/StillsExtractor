@@ -25,9 +25,10 @@ if (-not (Test-Path $venvPath)) {
     Write-Info "Virtual environment already exists."
 }
 
+$python = Join-Path $venvPath "Scripts\python.exe"
 $pip = Join-Path $venvPath "Scripts\pip.exe"
 Write-Info "Installing Python dependencies..."
-& $pip install --upgrade pip
+& $python -m pip install --upgrade pip
 & $pip install -r (Join-Path $ScriptRoot "requirements.txt")
 
 foreach ($tool in @("ffmpeg", "ffprobe")) {
