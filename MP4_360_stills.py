@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import webbrowser
 import tkinter as tk
 from collections.abc import Callable
 from pathlib import Path
@@ -774,6 +775,134 @@ def _disk_space_check(out_dir: Path, required_bytes: int) -> tuple[bool, str]:
     )
 
 
+DARK_THEME: dict[str, str] = {
+    "bg": "#1e1e1e",
+    "fg": "#e8e8e8",
+    "muted": "#9a9a9a",
+    "warn": "#e0a030",
+    "entry_bg": "#2d2d2d",
+    "select_bg": "#3d6ba8",
+    "button_bg": "#383838",
+    "button_active": "#4a4a4a",
+    "border": "#555555",
+    "canvas_bg": "#1e1e1e",
+    "log_bg": "#252525",
+}
+
+BRAND_URL = "https://www.grenadefpv.com/"
+BRAND_LOGO_MAX_HEIGHT = 72
+
+
+def _brand_logo_path() -> Path:
+    return Path(__file__).resolve().parent / "assets" / "logo.png"
+
+
+def _load_brand_logo(max_height: int = BRAND_LOGO_MAX_HEIGHT) -> Image.Image | None:
+    path = _brand_logo_path()
+    if not path.is_file():
+        return None
+    try:
+        with Image.open(path) as im:
+            logo = im.copy()
+    except OSError:
+        return None
+    if logo.mode != "RGBA":
+        logo = logo.convert("RGBA")
+    width, height = logo.size
+    if height > max_height:
+        new_width = max(1, int(width * max_height / height))
+        logo = logo.resize((new_width, max_height), Image.Resampling.LANCZOS)
+    return logo
+
+
+def _configure_dark_theme(root: tk.Misc) -> dict[str, str]:
+    """Apply dark ttk theme. Returns color dict for tk widgets (Canvas, Text)."""
+    c = dict(DARK_THEME)
+    if isinstance(root, (tk.Tk, tk.Toplevel)):
+        root.configure(bg=c["bg"])
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    style.configure(".", background=c["bg"], foreground=c["fg"])
+    style.configure("TFrame", background=c["bg"])
+    style.configure("TLabel", background=c["bg"], foreground=c["fg"])
+    style.configure("Muted.TLabel", background=c["bg"], foreground=c["muted"])
+    style.configure("Warn.TLabel", background=c["bg"], foreground=c["warn"])
+    style.configure(
+        "TButton",
+        background=c["button_bg"],
+        foreground=c["fg"],
+        bordercolor=c["border"],
+        focusthickness=1,
+        focuscolor=c["select_bg"],
+    )
+    style.map(
+        "TButton",
+        background=[("active", c["button_active"]), ("pressed", c["button_active"])],
+        foreground=[("disabled", c["muted"])],
+    )
+    style.configure(
+        "TEntry",
+        fieldbackground=c["entry_bg"],
+        foreground=c["fg"],
+        insertcolor=c["fg"],
+        bordercolor=c["border"],
+    )
+    style.configure(
+        "TCombobox",
+        fieldbackground=c["entry_bg"],
+        foreground=c["fg"],
+        selectbackground=c["select_bg"],
+        selectforeground=c["fg"],
+        arrowcolor=c["fg"],
+        bordercolor=c["border"],
+    )
+    style.map("TCombobox", fieldbackground=[("readonly", c["entry_bg"])])
+    style.configure(
+        "TSpinbox",
+        fieldbackground=c["entry_bg"],
+        foreground=c["fg"],
+        arrowcolor=c["fg"],
+        bordercolor=c["border"],
+    )
+    style.configure("TLabelframe", background=c["bg"], foreground=c["fg"], bordercolor=c["border"])
+    style.configure("TLabelframe.Label", background=c["bg"], foreground=c["fg"])
+    style.configure(
+        "TCheckbutton",
+        background=c["bg"],
+        foreground=c["fg"],
+        indicatorcolor=c["entry_bg"],
+        bordercolor=c["border"],
+    )
+    style.map("TCheckbutton", background=[("active", c["bg"])])
+    style.configure(
+        "TRadiobutton",
+        background=c["bg"],
+        foreground=c["fg"],
+        indicatorcolor=c["entry_bg"],
+        bordercolor=c["border"],
+    )
+    style.map("TRadiobutton", background=[("active", c["bg"])])
+    style.configure(
+        "Horizontal.TProgressbar",
+        background=c["select_bg"],
+        troughcolor=c["entry_bg"],
+        bordercolor=c["border"],
+    )
+    style.configure(
+        "Vertical.TScrollbar",
+        background=c["button_bg"],
+        troughcolor=c["entry_bg"],
+        bordercolor=c["border"],
+        arrowcolor=c["fg"],
+    )
+    style.map("Vertical.TScrollbar", background=[("active", c["button_active"])])
+    return c
+
+
 # --- Face mask polygon editor ------------------------------------------------
 
 
@@ -787,6 +916,7 @@ class FaceMaskEditor(tk.Toplevel):
         on_save: Callable[[FaceMaskPolygons], None],
     ) -> None:
         super().__init__(parent)
+        _configure_dark_theme(self)
         label = FACE_LABELS.get(face, face)
         self.title(f"Mask editor — {label} ({face})")
         self.resizable(False, False)
@@ -816,7 +946,7 @@ class FaceMaskEditor(tk.Toplevel):
             width=self._size,
             height=self._size,
             highlightthickness=1,
-            highlightbackground="#cccccc",
+            highlightbackground=DARK_THEME["border"],
             cursor="crosshair",
         )
         self._canvas.pack(padx=10, pady=4)
@@ -895,6 +1025,7 @@ class EquirectMaskEditor(tk.Toplevel):
         on_save: Callable[[FaceMaskPolygons], None],
     ) -> None:
         super().__init__(parent)
+        _configure_dark_theme(self)
         self.title("Mask editor — equirectangular (all faces)")
         self.resizable(False, False)
         self.transient(parent)
@@ -927,7 +1058,7 @@ class EquirectMaskEditor(tk.Toplevel):
             width=self._width,
             height=self._height,
             highlightthickness=1,
-            highlightbackground="#cccccc",
+            highlightbackground=DARK_THEME["border"],
             cursor="crosshair",
         )
         self._canvas.pack(padx=10, pady=4)
@@ -1007,6 +1138,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("360 Cubemap Stills Extractor")
+        self._theme = _configure_dark_theme(self)
         self.minsize(640, 520)
         self.geometry("760x720")
 
@@ -1045,13 +1177,52 @@ class App(tk.Tk):
         )
 
         self._build_ui()
+        self._apply_dark_tk_widgets()
         self._bind_events()
         self._refresh_user_mask_combo()
+
+    def _build_brand_header(self, parent: ttk.Frame) -> None:
+        header = ttk.Frame(parent)
+        header.pack(fill=tk.X, pady=(0, 6))
+
+        self._logo_photo: PhotoImage | None = None
+        logo_image = _load_brand_logo()
+        if logo_image is not None:
+            self._logo_photo = PhotoImage(logo_image)
+            logo_label = tk.Label(
+                header,
+                image=self._logo_photo,
+                bg=self._theme["bg"],
+                cursor="hand2",
+                borderwidth=0,
+                highlightthickness=0,
+            )
+            logo_label.pack(anchor=tk.W)
+            logo_label.bind("<Button-1>", lambda _e: webbrowser.open(BRAND_URL))
+            ttk.Label(
+                header,
+                text="360 equirect video → cubemap PNG stills for photogrammetry",
+                style="Muted.TLabel",
+            ).pack(anchor=tk.W, pady=(4, 0))
+        else:
+            brand_btn = ttk.Button(
+                header,
+                text="Grenade FPV",
+                command=lambda: webbrowser.open(BRAND_URL),
+            )
+            brand_btn.pack(anchor=tk.W)
+            ttk.Label(
+                header,
+                text="360 equirect video → cubemap PNG stills for photogrammetry",
+                style="Muted.TLabel",
+            ).pack(anchor=tk.W, pady=(4, 0))
 
     def _build_ui(self) -> None:
         pad = {"padx": 10, "pady": 4}
         outer = ttk.Frame(self, padding=10)
         outer.pack(fill=tk.BOTH, expand=True)
+
+        self._build_brand_header(outer)
 
         scroll_container = ttk.Frame(outer)
         scroll_container.pack(fill=tk.BOTH, expand=True)
@@ -1082,10 +1253,6 @@ class App(tk.Tk):
 
         footer = ttk.Frame(outer)
         footer.pack(fill=tk.BOTH, expand=False, pady=(8, 0))
-
-        ttk.Label(frm, text="360 equirect video to cubemap PNG stills per time sample").pack(
-            anchor=tk.W, pady=(0, 8)
-        )
 
         row1 = ttk.Frame(frm)
         row1.pack(fill=tk.X, **pad)
@@ -1168,12 +1335,12 @@ class App(tk.Tk):
         ttk.Label(
             preview_time_row,
             text="Masks use this frame; changing time clears masks.",
-            foreground="#666666",
+            style="Muted.TLabel",
         ).pack(side=tk.LEFT, padx=(6, 0))
         self._preview_status = ttk.Label(
             preview_frm,
             text="Select a video to load direction previews.",
-            foreground="#666666",
+            style="Muted.TLabel",
         )
         self._preview_status.pack(anchor=tk.W, padx=6, pady=(4, 2))
 
@@ -1253,15 +1420,13 @@ class App(tk.Tk):
                 "Reusable masks live in usermasks/ (polygon JSON, not PNG). "
                 "Per-video copy still saved beside source on extract."
             ),
-            foreground="#666666",
+            style="Muted.TLabel",
             wraplength=520,
         ).pack(anchor=tk.W, padx=2, pady=(0, 2))
         ttk.Label(
             self._mask_body,
-            text=(
-                "Excluded regions are filled black on stills only — no separate mask image files."
-            ),
-            foreground="#666666",
+            text="Excluded regions are filled black on stills only — no separate mask image files.",
+            style="Muted.TLabel",
             wraplength=520,
         ).pack(anchor=tk.W, padx=2, pady=(0, 2))
 
@@ -1271,7 +1436,7 @@ class App(tk.Tk):
                 "Uncheck a direction to skip it in the extract (e.g. handheld operator behind the camera). "
                 "Horizontal + down is typical for outdoor drone scans."
             ),
-            foreground="#666666",
+            style="Muted.TLabel",
             wraplength=520,
         ).pack(anchor=tk.W, pady=(4, 0))
 
@@ -1299,7 +1464,7 @@ class App(tk.Tk):
             justify=tk.LEFT,
         ).pack(anchor=tk.W, padx=8, pady=(0, 8))
 
-        self.warn_label = ttk.Label(frm, text="", foreground="#c07000", wraplength=680)
+        self.warn_label = ttk.Label(frm, text="", style="Warn.TLabel", wraplength=680)
         self.warn_label.pack(anchor=tk.W, padx=10, pady=(0, 4))
 
         self.progress_text = tk.StringVar(value="")
@@ -1323,6 +1488,17 @@ class App(tk.Tk):
         self._log_body = ttk.Frame(footer)
         self.log = scrolledtext.ScrolledText(self._log_body, height=8, state=tk.DISABLED, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True)
+
+    def _apply_dark_tk_widgets(self) -> None:
+        c = self._theme
+        self._scroll_canvas.configure(bg=c["canvas_bg"])
+        self.log.configure(
+            bg=c["log_bg"],
+            fg=c["fg"],
+            insertbackground=c["fg"],
+            selectbackground=c["select_bg"],
+            selectforeground=c["fg"],
+        )
 
     def _toggle_log_section(self, expand: bool | None = None) -> None:
         if expand is None:
