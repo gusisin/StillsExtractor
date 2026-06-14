@@ -1313,9 +1313,26 @@ class App(tk.Tk):
         self.extract_btn = ttk.Button(btn_row, text="Extract cubemap stills", command=self._start_extract)
         self.extract_btn.pack(side=tk.LEFT)
 
-        ttk.Label(footer, text="Log").pack(anchor=tk.W, pady=(8, 0))
-        self.log = scrolledtext.ScrolledText(footer, height=8, state=tk.DISABLED, wrap=tk.WORD)
-        self.log.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        self._log_toggle_btn = ttk.Button(
+            footer,
+            text="▶ Log",
+            command=self._toggle_log_section,
+        )
+        self._log_toggle_btn.pack(anchor=tk.W, pady=(8, 0))
+
+        self._log_body = ttk.Frame(footer)
+        self.log = scrolledtext.ScrolledText(self._log_body, height=8, state=tk.DISABLED, wrap=tk.WORD)
+        self.log.pack(fill=tk.BOTH, expand=True)
+
+    def _toggle_log_section(self, expand: bool | None = None) -> None:
+        if expand is None:
+            expand = not self._log_body.winfo_ismapped()
+        if expand:
+            self._log_body.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+            self._log_toggle_btn.configure(text="▼ Log")
+        else:
+            self._log_body.pack_forget()
+            self._log_toggle_btn.configure(text="▶ Log")
 
     def _toggle_mask_section(self) -> None:
         if self._mask_body.winfo_ismapped():
@@ -1925,6 +1942,7 @@ class App(tk.Tk):
                 return
 
         self.extract_btn.configure(state=tk.DISABLED)
+        self._toggle_log_section(expand=True)
         self.progress.configure(mode="determinate", maximum=max(total_png, 1), value=0)
         self.progress_text.set("Starting extraction...")
         self.log.configure(state=tk.NORMAL)
