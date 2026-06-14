@@ -20,7 +20,7 @@ import time
 import tkinter as tk
 from collections.abc import Callable
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any
 
 try:
@@ -342,8 +342,68 @@ def _face_from_still_path(path: Path) -> str | None:
     return match.group(3).lower() if match else None
 
 
-def _mask_path_for_still(still_path: Path) -> Path:
-    return still_path.with_name(f"{still_path.stem}_mask.png")
+def _mask_sidecar_dir(video: Path) -> Path:
+    """Mask definitions and companion PNGs live beside the source video, not in stills output."""
+    return video.parent / f"{video.stem}_masks"
+
+
+def _masks_json_path(video: Path) -> Path:
+    return _mask_sidecar_dir(video) / "face_masks.json"
+
+
+def _app_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _user_masks_dir() -> Path:
+    path = _app_root() / "usermasks"
+    path.mkdir(exist_ok=True)
+    return path
+
+
+def _sanitize_user_mask_name(raw: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "-", (raw or "").strip()).strip("-_")
+    return cleaned[:64] if cleaned else "mask"
+
+
+def _list_user_mask_names() -> list[str]:
+    return sorted(p.stem for p in _user_masks_dir().glob("*.json"))
+
+
+def _user_mask_path(name: str) -> Path:
+    return _user_masks_dir() / f"{_sanitize_user_mask_name(name)}.json"
+
+
+def _parse_masks_payload(data: dict[str, Any]) -> tuple[FaceMaskMap, FaceMaskPolygons, float]:
+    faces_raw = data.get("faces") or {}
+    face_masks: FaceMaskMap = {face: [] for face in CUBEMAP_FACE_ORDER}
+    for face, polys in faces_raw.items():
+        if face in face_masks and isinstance(polys, list):
+            face_masks[face] = [
+                [(float(pt[0]), float(pt[1])) for pt in poly]
+                for poly in polys
+                if isinstance(poly, list) and len(poly) >= 3
+            ]
+    equirect_raw = data.get("equirect") or []
+    equirect_polygons: FaceMaskPolygons = [
+        [(float(pt[0]), float(pt[1])) for pt in poly]
+        for poly in equirect_raw
+        if isinstance(poly, list) and len(poly) >= 3
+    ]
+    preview_time = float(data.get("preview_time_sec") or 0.0)
+    return face_masks, equirect_polygons, preview_time
+
+
+def _load_masks_json(path: Path) -> tuple[FaceMaskMap, FaceMaskPolygons, float] | None:
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return _parse_masks_payload(data)
 
 
 def _apply_face_masks_batch(
@@ -352,14 +412,13 @@ def _apply_face_masks_batch(
     equirect_polygons: FaceMaskPolygons,
     *,
     face_size: int = 0,
-    export_mask_pngs: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
-) -> tuple[int, int, int]:
-    """Apply exclude polygons to stills. Returns (ok_stills, fail_stills, mask_pngs_written)."""
+) -> tuple[int, int]:
+    """Apply exclude polygons to stills. Returns (ok_stills, fail_stills)."""
     if not paths or not _masks_active(face_masks, equirect_polygons):
-        return 0, 0, 0
+        return 0, 0
     equirect_templates = _build_equirect_exclude_templates(equirect_polygons, face_size)
-    ok = fail = masks_written = 0
+    ok = fail = 0
     total = len(paths)
     for idx, path in enumerate(paths, 1):
         face = _face_from_still_path(path)
@@ -382,17 +441,12 @@ def _apply_face_masks_batch(
                     continue
                 masked = _apply_exclude_mask_to_image(im, exclude)
                 _save_still_png(masked, path)
-                if export_mask_pngs:
-                    use_mask = Image.eval(exclude, lambda px: 255 - px)
-                    mask_path = _mask_path_for_still(path)
-                    _save_still_png(use_mask.convert("RGB"), mask_path)
-                    masks_written += 1
             ok += 1
         except OSError:
             fail += 1
         if on_progress:
             on_progress(idx, total)
-    return ok, fail, masks_written
+    return ok, fail
 
 
 def _save_masks_json(
@@ -400,8 +454,14 @@ def _save_masks_json(
     face_masks: FaceMaskMap,
     equirect_polygons: FaceMaskPolygons,
     preview_time_sec: float,
+    *,
+    video: Path | None = None,
+    output_prefix: str | None = None,
+    library_name: str | None = None,
+    description: str | None = None,
 ) -> None:
-    payload = {
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
         "version": 2,
         "preview_time_sec": preview_time_sec,
         "note": "Normalized 0-1 vertices; polygon interior excluded (black fill in stills).",
@@ -412,7 +472,36 @@ def _save_masks_json(
             if polygons
         },
     }
+    if video is not None:
+        payload["source_video"] = str(video)
+    if output_prefix:
+        payload["output_prefix"] = output_prefix
+    if library_name:
+        payload["library_name"] = library_name
+    if description:
+        payload["description"] = description
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _save_user_mask_library(
+    name: str,
+    face_masks: FaceMaskMap,
+    equirect_polygons: FaceMaskPolygons,
+    preview_time_sec: float,
+    *,
+    description: str | None = None,
+) -> Path:
+    safe_name = _sanitize_user_mask_name(name)
+    path = _user_mask_path(safe_name)
+    _save_masks_json(
+        path,
+        face_masks,
+        equirect_polygons,
+        preview_time_sec,
+        library_name=safe_name,
+        description=description,
+    )
+    return path
 
 
 def _generate_face_previews(
@@ -949,7 +1038,6 @@ class App(tk.Tk):
         self._mask_preview_time_loaded = -1.0
         self._preview_video_path = ""
         self.mask_preview_sec = tk.DoubleVar(value=0.0)
-        self.export_mask_pngs = tk.BooleanVar(value=False)
         self.training_priority = tk.StringVar(value="balanced")
         self.estimate_text = tk.StringVar(value="Select a video to see sample estimate.")
         self.training_recommendation = tk.StringVar(
@@ -958,6 +1046,7 @@ class App(tk.Tk):
 
         self._build_ui()
         self._bind_events()
+        self._refresh_user_mask_combo()
 
     def _build_ui(self) -> None:
         pad = {"padx": 10, "pady": 4}
@@ -1148,14 +1237,30 @@ class App(tk.Tk):
         ttk.Button(mask_row, text="Edit mask…", command=self._open_mask_editor).pack(side=tk.LEFT, padx=6)
         ttk.Button(mask_row, text="Clear face", command=self._clear_face_mask).pack(side=tk.LEFT)
         ttk.Button(mask_row, text="Clear all masks", command=self._clear_all_masks).pack(side=tk.LEFT, padx=6)
-        ttk.Checkbutton(
-            self._mask_body,
-            text="Export companion mask PNGs (e.g. eqipano-000001_f_mask.png, white=use, black=exclude)",
-            variable=self.export_mask_pngs,
-        ).pack(anchor=tk.W, padx=2, pady=(0, 4))
+
+        library_row = ttk.Frame(self._mask_body)
+        library_row.pack(fill=tk.X, padx=2, pady=(6, 2))
+        ttk.Label(library_row, text="Saved masks").pack(side=tk.LEFT)
+        self._user_mask_combo = ttk.Combobox(library_row, state="readonly", width=24)
+        self._user_mask_combo.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(library_row, text="Load", command=self._load_user_mask).pack(side=tk.LEFT, padx=4)
+        ttk.Button(library_row, text="Save current…", command=self._save_user_mask).pack(side=tk.LEFT)
+        ttk.Button(library_row, text="Delete", command=self._delete_user_mask).pack(side=tk.LEFT, padx=4)
+
         ttk.Label(
             self._mask_body,
-            text="Equirect mask projects to all faces; per-face masks add local tweaks.",
+            text=(
+                "Reusable masks live in usermasks/ (polygon JSON, not PNG). "
+                "Per-video copy still saved beside source on extract."
+            ),
+            foreground="#666666",
+            wraplength=520,
+        ).pack(anchor=tk.W, padx=2, pady=(0, 2))
+        ttk.Label(
+            self._mask_body,
+            text=(
+                "Excluded regions are filled black on stills only — no separate mask image files."
+            ),
             foreground="#666666",
             wraplength=520,
         ).pack(anchor=tk.W, padx=2, pady=(0, 2))
@@ -1355,6 +1460,122 @@ class App(tk.Tk):
         self._preview_photos[face] = photo
         label.configure(image=photo, text="")
 
+    def _apply_loaded_masks(
+        self,
+        face_masks: FaceMaskMap,
+        equirect_polygons: FaceMaskPolygons,
+    ) -> None:
+        self._face_masks = face_masks
+        self._equirect_mask_polygons = equirect_polygons
+        self._rebuild_equirect_face_excludes()
+        for face in self._face_preview_images:
+            self._update_face_thumb(face)
+
+    def _refresh_user_mask_combo(self, select: str | None = None) -> None:
+        names = _list_user_mask_names()
+        self._user_mask_combo["values"] = names
+        if select and select in names:
+            self._user_mask_combo.set(select)
+        elif names:
+            self._user_mask_combo.set(names[0])
+        else:
+            self._user_mask_combo.set("")
+
+    def _load_user_mask(self) -> None:
+        name = self._user_mask_combo.get().strip()
+        if not name:
+            messagebox.showwarning("Saved masks", "No saved mask selected. Save one first or pick from the list.")
+            return
+        loaded = _load_masks_json(_user_mask_path(name))
+        if loaded is None:
+            messagebox.showerror("Saved masks", f"Could not read mask '{name}'.")
+            return
+        face_masks, equirect, _ = loaded
+        if not _masks_active(face_masks, equirect):
+            messagebox.showwarning("Saved masks", f"Mask '{name}' is empty.")
+            return
+        if not self._face_preview_images:
+            messagebox.showwarning(
+                "Saved masks",
+                "Load video previews first so mask overlays can be shown.",
+            )
+        self._apply_loaded_masks(face_masks, equirect)
+        self._preview_status.configure(text=f"Loaded saved mask '{name}'.")
+
+    def _save_user_mask(self) -> None:
+        if not _masks_active(self._face_masks, self._equirect_mask_polygons):
+            messagebox.showwarning(
+                "Save mask",
+                "Draw a mask first (equirect or per-face), then save to the library.",
+            )
+            return
+        raw_name = simpledialog.askstring(
+            "Save mask to library",
+            "Name for this mask (e.g. drone_props):",
+            parent=self,
+        )
+        if not raw_name:
+            return
+        safe_name = _sanitize_user_mask_name(raw_name)
+        if safe_name != raw_name.strip():
+            messagebox.showinfo(
+                "Save mask",
+                f"Saved as '{safe_name}' (sanitized file name).",
+            )
+        existing = _user_mask_path(safe_name)
+        if existing.is_file():
+            ok = messagebox.askyesno(
+                "Overwrite mask",
+                f"Mask '{safe_name}' already exists. Replace it?",
+            )
+            if not ok:
+                return
+        description = simpledialog.askstring(
+            "Save mask to library",
+            "Short description (optional, e.g. DJI props on up/down):",
+            parent=self,
+        )
+        path = _save_user_mask_library(
+            safe_name,
+            copy.deepcopy(self._face_masks),
+            copy.deepcopy(self._equirect_mask_polygons),
+            self._mask_preview_time_loaded if self._mask_preview_time_loaded >= 0 else 0.0,
+            description=(description or "").strip() or None,
+        )
+        self._refresh_user_mask_combo(select=safe_name)
+        messagebox.showinfo("Save mask", f"Saved to {path}")
+
+    def _delete_user_mask(self) -> None:
+        name = self._user_mask_combo.get().strip()
+        if not name:
+            messagebox.showwarning("Saved masks", "No saved mask selected.")
+            return
+        if not messagebox.askyesno("Delete mask", f"Delete saved mask '{name}' permanently?"):
+            return
+        path = _user_mask_path(name)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            messagebox.showerror("Delete mask", f"Could not delete: {exc}")
+            return
+        self._refresh_user_mask_combo()
+
+    def _try_load_masks_from_sidecar(self, video: Path) -> None:
+        loaded = _load_masks_json(_masks_json_path(video))
+        if loaded is None:
+            return
+        face_masks, equirect, preview_time = loaded
+        if not _masks_active(face_masks, equirect):
+            return
+        self._apply_loaded_masks(face_masks, equirect)
+        if abs(preview_time - self._mask_preview_time_loaded) > 0.01:
+            self._preview_status.configure(
+                text=(
+                    f"{self._preview_status.get()} "
+                    f"(loaded saved masks from t={preview_time:g}s)."
+                )
+            )
+
     def _clear_face_previews(self) -> None:
         self._face_preview_images.clear()
         self._equirect_preview_image = None
@@ -1452,6 +1673,9 @@ class App(tk.Tk):
                     label.configure(image="", text="?")
         for face in previews:
             self._update_face_thumb(face)
+        video = Path(self.video_path.get().strip()).expanduser()
+        if video.is_file():
+            self._try_load_masks_from_sidecar(video)
         time_sec = self._mask_preview_time_loaded
         if previews:
             note = f"Preview at t={time_sec:g}s ({len(previews)} face(s))."
@@ -1716,7 +1940,6 @@ class App(tk.Tk):
 
         face_masks = copy.deepcopy(self._face_masks)
         equirect_masks = copy.deepcopy(self._equirect_mask_polygons)
-        export_masks = bool(self.export_mask_pngs.get())
         preview_time = self._mask_preview_time_loaded
         if _masks_active(face_masks, equirect_masks):
             parts: list[str] = []
@@ -1729,8 +1952,7 @@ class App(tk.Tk):
                 f"[INFO] Masks at t={preview_time:g}s: "
                 f"{'; '.join(parts)} — applied to all time samples.\n"
             )
-            if export_masks:
-                self._log("[INFO] Companion mask PNGs will be written.\n")
+            self._log(f"[INFO] Mask definitions → {_mask_sidecar_dir(video) / 'face_masks.json'}\n")
 
         self._worker = threading.Thread(
             target=self._extract_worker,
@@ -1744,7 +1966,6 @@ class App(tk.Tk):
                 total_png,
                 face_masks,
                 equirect_masks,
-                export_masks,
                 preview_time,
             ),
             daemon=True,
@@ -1773,7 +1994,6 @@ class App(tk.Tk):
         total_png: int,
         face_masks: FaceMaskMap,
         equirect_masks: FaceMaskPolygons,
-        export_mask_pngs: bool,
         mask_preview_time_sec: float,
     ) -> None:
         def report(current: int, message: str) -> None:
@@ -1859,30 +2079,32 @@ class App(tk.Tk):
                 def mask_progress(done: int, mask_total: int) -> None:
                     report(total_png, f"Applying masks {done} of {mask_total}...")
 
-                mask_ok, mask_fail, masks_written = _apply_face_masks_batch(
+                mask_ok, mask_fail = _apply_face_masks_batch(
                     still_pngs,
                     face_masks,
                     equirect_masks,
                     face_size=max_width,
-                    export_mask_pngs=export_mask_pngs,
                     on_progress=mask_progress,
                 )
                 if mask_fail:
                     self._log(f"[WARN] Mask apply failed for {mask_fail} still(s).\n")
                 else:
                     self._log(f"[INFO] Applied masks to {mask_ok} still(s) (excluded regions filled black).\n")
-                if export_mask_pngs and masks_written:
-                    self._log(f"[INFO] Wrote {masks_written} companion mask PNG(s).\n")
-                masks_json = out_dir / f"{prefix}_face_masks.json"
+                masks_json = _masks_json_path(video)
                 try:
-                    _save_masks_json(masks_json, face_masks, equirect_masks, mask_preview_time_sec)
-                    self._log(f"[INFO] Saved mask definitions to {masks_json.name}\n")
+                    _save_masks_json(
+                        masks_json,
+                        face_masks,
+                        equirect_masks,
+                        mask_preview_time_sec,
+                        video=video,
+                        output_prefix=prefix,
+                    )
+                    self._log(f"[INFO] Saved mask definitions to {masks_json}\n")
                 except OSError as exc:
                     self._log(f"[WARN] Could not save mask JSON: {exc}\n")
 
             pngs = list(still_pngs)
-            if export_mask_pngs and _masks_active(face_masks, equirect_masks):
-                pngs.extend(sorted(out_dir.glob(f"{prefix}-*_mask.png")))
             self._log(f"\n[INFO] Stripping PNG metadata ({len(pngs)} file(s))...\n")
             report(
                 _count_prefix_pngs(out_dir, prefix),
