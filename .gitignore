@@ -20,3 +20,7 @@ Thumbs.db
 stills/
 outputs/
 *.log
+
+# Reusable mask library (user-created; keep folder via .gitkeep)
+usermasks/*
+!usermasks/.gitkeep
